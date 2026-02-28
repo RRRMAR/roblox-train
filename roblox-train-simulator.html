@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roblox Train Simulator - Phitsanulok Line</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #87CEEB;
+            font-family: 'Comic Sans MS', 'Arial Rounded MT Bold', sans-serif;
+            user-select: none;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            border: 4px solid #333;
+            z-index: 10;
+            box-shadow: 4px 4px 0px rgba(0, 0, 0, 0.2);
+            pointer-events: none;
+        }
+
+        h1 {
+            margin: 0 0 5px 0;
+            color: #E32636;
+            text-shadow: 1px 1px 0 #000;
+            font-size: 24px;
+        }
+
+        .stat {
+            font-size: 18px;
+            font-weight: bold;
+            margin: 5px 0;
+            color: #333;
+        }
+
+        .highlight {
+            color: #2980B9;
+        }
+
+        #controls-help {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: 2px solid #555;
+            font-size: 16px;
+        }
+
+        .key {
+            display: inline-block;
+            background: #ddd;
+            color: #000;
+            border: 2px solid #999;
+            border-radius: 4px;
+            padding: 2px 8px;
+            margin: 0 4px;
+            font-weight: bold;
+            font-family: monospace;
+        }
+    </style>
+    <!-- Import maps polyfill -->
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+</head>
+
+<body>
+    <div id="ui">
+        <h1>🚂 Oof! Train Sim</h1>
+        <div class="stat">Speed: <span id="speed-val" class="highlight">0</span> km/h</div>
+        <div class="stat">Location: <span id="station-val" class="highlight">Chiang Mai Station</span></div>
+    </div>
+
+    <div id="controls-help">
+        Controls: <span class="key">W</span> Accelerate | <span class="key">S</span> Brake/Reverse | <span
+            class="key">Mouse Drag</span> Look Around
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // 1. Hardcoded Route Data (extracted from CSV constraints)
+        const stationsData = [
+            { lat: 18.788, lon: 98.985, name: "Chiang Mai Sector" },
+            { lat: 18.751, lon: 98.995, name: "Saraphi Baseplate" },
+            { lat: 18.579, lon: 99.011, name: "Lamphun Station" },
+            { lat: 18.337, lon: 99.398, name: "Lampang Hub" },
+            { lat: 18.096, lon: 99.867, name: "Denchai Tunnel" },
+            { lat: 17.839, lon: 100.046, name: "Uttaradit Spawn" },
+            { lat: 17.382, lon: 100.089, name: "Phrom Phiram Checks" },
+            { lat: 16.835, lon: 100.214, name: "PSRU Final Boss" }
+        ];
+
+        // 2. Setup Scene
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Roblox blue sky
+        scene.fog = new THREE.Fog(0x87CEEB, 20, 150);
+
+        // Lighting
+        const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+        scene.add(ambient);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        dirLight.position.set(50, 100, 50);
+        dirLight.castShadow = true;
+        // Big shadow map for the blocky feel
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 0.5;
+        dirLight.shadow.camera.far = 300;
+        dirLight.shadow.camera.left = -100;
+        dirLight.shadow.camera.right = 100;
+        dirLight.shadow.camera.top = 100;
+        dirLight.shadow.camera.bottom = -100;
+        scene.add(dirLight);
+
+        // Renderer
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // Camera
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
+
+        // 3. Track Mathematics
+        const centerLat = 17.8;
+        const centerLon = 99.5;
+        const mapScale = 40; // Scale up for a longer track
+
+        function getPos(lat, lon) {
+            const x = (lon - centerLon) * mapScale;
+            // Stretch Z axis to make the track longer and better for trains
+            const z = -(lat - centerLat) * mapScale * 3.0;
+            const y = 0; // Flat baseplate for simplicity
+            return new THREE.Vector3(x, y, z);
+        }
+
+        const points = stationsData.map(s => getPos(s.lat, s.lon));
+
+        // Add sweeping return waypoints to create a massive circular loop track 
+        // back to the start, instead of snapping directly through the map
+        const firstPt = points[0];
+        const lastPt = points[points.length - 1];
+
+        // Calculate the central point between start and end along Z axis
+        const midZ = (firstPt.z + lastPt.z) / 2;
+        const radius = Math.abs(firstPt.z - lastPt.z) * 0.75;
+        const centerX = firstPt.x - radius * 0.8;
+
+        // 1. Point stretching straight out from the end station (smooth exit)
+        const exitTangent = new THREE.Vector3().subVectors(lastPt, points[points.length - 2]).normalize();
+        points.push(new THREE.Vector3(lastPt.x + exitTangent.x * 60, 0, lastPt.z + exitTangent.z * 60));
+
+        // 2. Generate a smooth semi-circle of points
+        for (let i = 2; i <= 9; i++) {
+            const angle = -Math.PI / 2 + (Math.PI * (i / 11));
+            const px = centerX - Math.cos(angle) * radius;
+            const pz = midZ + Math.sin(angle) * (radius * 1.5);
+            points.push(new THREE.Vector3(px, 0, pz));
+        }
+
+        // 3. Point stretching straight backward into the first station (smooth entry)
+        const entryTangent = new THREE.Vector3().subVectors(points[1], firstPt).normalize();
+        points.push(new THREE.Vector3(firstPt.x - entryTangent.x * 60, 0, firstPt.z - entryTangent.z * 60));
+
+        // Apply bridge elevation for river crossing (river is at Z=-48, width 25)
+        points.forEach(p => {
+            // Check distance to river center Z=-48
+            const distToRiver = Math.abs(p.z - (-48));
+            if (distToRiver < 20) {
+                // Arc up to 12 height based on distance from center
+                p.y = 12 * (1 - Math.pow(distToRiver / 20, 2));
+            }
+        });
+
+        // Add curve, set closed to TRUE to make an endless loop
+        const curve = new THREE.CatmullRomCurve3(points, true);
+        const trackLength = curve.getLength();
+
+        // 4. Build Environment (Roblox Style)
+        // Huge flat green baseplate
+        const baseplateGeo = new THREE.BoxGeometry(1000, 2, 1000);
+        const baseplateMat = new THREE.MeshLambertMaterial({ color: 0x4CAF50 });
+        const baseplate = new THREE.Mesh(baseplateGeo, baseplateMat);
+        baseplate.position.y = -1; // Top face is at y=0
+        baseplate.receiveShadow = true;
+        scene.add(baseplate);
+
+        // Blocky Trees
+        const leavesMat = new THREE.MeshLambertMaterial({ color: 0x2E8B57 });
+        const trunkMat = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+
+        for (let i = 0; i < 400; i++) {
+            // Pick a point along track to cluster trees loosely around it
+            const t = Math.random();
+            const pt = curve.getPointAt(t);
+
+            // Offset randomly, strictly avoiding the track collision
+            let ox = (Math.random() - 0.5) * 200;
+            let oz = (Math.random() - 0.5) * 200;
+
+            // Enforce a strict clearance zone of 15 units around the track center
+            if (Math.abs(ox) < 15) ox += 15 * Math.sign(ox || 1);
+            if (Math.abs(oz) < 15) oz += 15 * Math.sign(oz || 1);
+
+            const isBig = Math.random() > 0.8;
+            const size = isBig ? 3 : 1.5;
+            const h = isBig ? 5 : 2;
+
+            const tree = new THREE.Group();
+
+            const trunk = new THREE.Mesh(new THREE.BoxGeometry(size * 0.4, h, size * 0.4), trunkMat);
+            trunk.position.y = h / 2;
+            trunk.castShadow = true;
+            trunk.receiveShadow = true;
+            tree.add(trunk);
+
+            const leaves = new THREE.Mesh(new THREE.BoxGeometry(size * 1.5, size * 1.5, size * 1.5), leavesMat);
+            leaves.position.y = h + size / 2;
+            leaves.castShadow = true;
+            leaves.receiveShadow = true;
+            tree.add(leaves);
+
+            tree.position.set(pt.x + ox, 0, pt.z + oz);
+            scene.add(tree);
+        }
+
+        // Low-poly Mountains (Roblox style)
+        const mountainMatLight = new THREE.MeshLambertMaterial({ color: 0x556B2F }); // Olive Drab
+        const mountainMatDark = new THREE.MeshLambertMaterial({ color: 0x6B8E23 });  // Olive Drab Darker
+
+        for (let i = 0; i < 45; i++) {
+            let placed = false;
+            let mx, mz;
+
+            // Try up to 10 times to find a safe spot away from the tracks
+            for (let attempt = 0; attempt < 10; attempt++) {
+                mx = (Math.random() - 0.5) * 800; // Wide spread
+                mz = (Math.random() - 0.5) * 800;
+
+                let tooClose = false;
+                // Check distance against sampled track points
+                for (let t = 0; t <= 1.0; t += 0.02) {
+                    const pt = curve.getPointAt(t);
+                    const distSq = (pt.x - mx) ** 2 + (pt.z - mz) ** 2;
+                    // Keep mountains at least 50 units away from any track point
+                    if (distSq < 2500) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+
+                if (!tooClose) {
+                    placed = true;
+                    break;
+                }
+            }
+
+            if (placed) {
+                const radius = 20 + Math.random() * 40; // 20 to 60 wide
+                const height = 40 + Math.random() * 80; // 40 to 120 tall
+                const sides = 4 + Math.floor(Math.random() * 3); // 4 to 6 sides for blocky low-poly look
+
+                const mountainGeo = new THREE.ConeGeometry(radius, height, sides);
+                const mat = Math.random() > 0.5 ? mountainMatLight : mountainMatDark;
+                const mountain = new THREE.Mesh(mountainGeo, mat);
+
+                mountain.position.set(mx, height / 2 - 2, mz); // Sink slightly into ground
+                mountain.rotation.y = Math.random() * Math.PI;
+                mountain.castShadow = true;
+                mountain.receiveShadow = true;
+
+                scene.add(mountain);
+            }
+        }
+
+        // Stations
+        const stationMat = new THREE.MeshLambertMaterial({ color: 0xF39C12 });
+        stationsData.forEach((s, idx) => {
+            const p = points[idx];
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(5, 4, 5), stationMat);
+            mesh.position.copy(p);
+            // Move station off track
+            const tangent = curve.getTangentAt(idx / (stationsData.length - 1)).normalize();
+            const normal = new THREE.Vector3(-tangent.z, 0, tangent.x); // Perp to track
+            mesh.position.addScaledVector(normal, 6);
+            mesh.position.y = p.y + 2; // Floor matches track height
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+        });
+
+        // Tracks Geometry - Blocky spline
+        // Simple rectangular tube to look like track bed
+        // Use a flat rectangular shape instead of a tube so it doesn't look rolled
+        const trackShape = new THREE.Shape();
+        trackShape.moveTo(-1.5, -0.2);
+        trackShape.lineTo(-1.5, 0.2);
+        trackShape.lineTo(1.5, 0.2);
+        trackShape.lineTo(1.5, -0.2);
+        trackShape.lineTo(-1.5, -0.2);
+
+        const extrudeSettings = {
+            steps: 400,
+            extrudePath: curve,
+            bevelEnabled: false,
+        };
+        const trackGeo = new THREE.ExtrudeGeometry(trackShape, extrudeSettings);
+        const trackMat = new THREE.MeshLambertMaterial({ color: 0x555555 });
+        const trackObj = new THREE.Mesh(trackGeo, trackMat);
+
+        const trackGroup = new THREE.Group();
+        trackGroup.add(trackObj);
+        trackGroup.position.y = 0.5; // Lift up slightly
+        trackGroup.castShadow = true;
+        trackGroup.receiveShadow = true;
+        scene.add(trackGroup);
+
+        // 4.5 Build River and Bridges
+        // Large blue river cutting across the map
+        const riverGeo = new THREE.BoxGeometry(1000, 1.5, 25);
+        const riverMat = new THREE.MeshLambertMaterial({ color: 0x3498DB }); // Vivid Blue water
+        const river = new THREE.Mesh(riverGeo, riverMat);
+        river.position.set(0, -0.2, -48);
+        river.receiveShadow = true;
+        scene.add(river);
+
+        // Build wooden bridge planks and fences wherever the track crosses the river
+        const plankMat = new THREE.MeshLambertMaterial({ color: 0x8B4513 }); // Wood brown
+        const pillarMat = new THREE.MeshLambertMaterial({ color: 0x5c4033 }); // Darker brown
+        for (let i = 0; i < 1.0; i += 0.002) {
+            const pt = curve.getPointAt(i);
+            // Check distance to river center Z=-48. If within 15 units, draw bridge
+            if (Math.abs(pt.z - (-48)) < 15) {
+                const plankGeo = new THREE.BoxGeometry(8, 0.4, 2.0);
+                const plank = new THREE.Mesh(plankGeo, plankMat);
+                plank.position.copy(pt);
+                plank.position.y -= 0.1; // Place just under the track bed
+
+                const tangent = curve.getTangentAt(i);
+                plank.rotation.y = Math.atan2(tangent.x, tangent.z);
+                plank.receiveShadow = true;
+                plank.castShadow = true;
+                scene.add(plank);
+
+                // Add Bridge Fences (railings) periodically
+                if (Math.round(i * 1000) % 6 === 0) {
+                    const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+                    const fenceL = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.5, 0.5), plankMat);
+                    fenceL.position.copy(pt);
+                    fenceL.position.addScaledVector(normal, 3.8); // Shift left
+                    fenceL.position.y += 0.8;
+                    fenceL.rotation.y = Math.atan2(tangent.x, tangent.z);
+                    fenceL.castShadow = true;
+                    scene.add(fenceL);
+
+                    const fenceR = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.5, 0.5), plankMat);
+                    fenceR.position.copy(pt);
+                    fenceR.position.addScaledVector(normal, -3.8); // Shift right
+                    fenceR.position.y += 0.8;
+                    fenceR.rotation.y = Math.atan2(tangent.x, tangent.z);
+                    fenceR.castShadow = true;
+                    scene.add(fenceR);
+                }
+
+                // Add vertical support pillars down to the ground/river
+                if (Math.round(i * 1000) % 24 === 0) {
+                    const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+                    // Pillar height from ground (0) to track (pt.y)
+                    const pHeight = pt.y;
+                    if (pHeight > 2.0) {
+                        const pillarGeo = new THREE.BoxGeometry(1.5, pHeight, 1.5);
+
+                        const pillarL = new THREE.Mesh(pillarGeo, pillarMat);
+                        pillarL.position.copy(pt);
+                        pillarL.position.addScaledVector(normal, 2.5);
+                        pillarL.position.y = pHeight / 2; // Center vertically
+                        pillarL.rotation.y = Math.atan2(tangent.x, tangent.z);
+                        pillarL.castShadow = true;
+                        scene.add(pillarL);
+
+                        const pillarR = new THREE.Mesh(pillarGeo, pillarMat);
+                        pillarR.position.copy(pt);
+                        pillarR.position.addScaledVector(normal, -2.5);
+                        pillarR.position.y = pHeight / 2;
+                        pillarR.rotation.y = Math.atan2(tangent.x, tangent.z);
+                        pillarR.castShadow = true;
+                        scene.add(pillarR);
+                    }
+                }
+            }
+        }
+
+        // 5. Build Train
+        const trainGroup = new THREE.Group();
+
+        // Base Cart
+        const tBase = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 4.5), new THREE.MeshLambertMaterial({ color: 0x3498DB }));
+        tBase.position.y = 1.0;
+        tBase.castShadow = true;
+        trainGroup.add(tBase);
+
+        // Cabin
+        const tCab = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.8, 1.8), new THREE.MeshLambertMaterial({ color: 0xE74C3C }));
+        tCab.position.set(0, 2.0, -1.0);
+        tCab.castShadow = true;
+        trainGroup.add(tCab);
+
+        // Engine Nose
+        const tNose = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.2, 2.5), new THREE.MeshLambertMaterial({ color: 0x27AE60 }));
+        tNose.position.set(0, 1.7, 1.0);
+        tNose.castShadow = true;
+        trainGroup.add(tNose);
+
+        // Chimney (Smoke stack)
+        const tSmokestack = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.5, 0.6), new THREE.MeshLambertMaterial({ color: 0x222222 }));
+        tSmokestack.position.set(0, 2.5, 1.5);
+        tSmokestack.castShadow = true;
+        trainGroup.add(tSmokestack);
+
+        scene.add(trainGroup);
+        // Start at first station
+        trainGroup.position.copy(curve.getPointAt(0));
+
+        // 6. Game Logic (Keyboard Input & Physics)
+        const keys = { w: false, s: false };
+        window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'w' || e.key === 'ArrowUp') keys.w = true;
+            if (e.key.toLowerCase() === 's' || e.key === 'ArrowDown') keys.s = true;
+        });
+        window.addEventListener('keyup', (e) => {
+            if (e.key.toLowerCase() === 'w' || e.key === 'ArrowUp') keys.w = false;
+            if (e.key.toLowerCase() === 's' || e.key === 'ArrowDown') keys.s = false;
+        });
+
+        let progress = 0; // 0.0 to 1.0 along the curve
+        let velocity = 0;
+
+        // Train Physics Tuning
+        // Halved speed to top out at visually 30 km/h
+        const maxVelocity = 0.0005;
+        const acceleration = 0.0003;
+        const brakes = 0.0005;
+        const friction = 0.993;
+
+        // 5.1 Build Carriages
+        const carriages = [];
+        const numCarriages = 5;
+        // Calculate exact mathematical spacing based on the size of the box (3.8 long) 
+        // plus a microscopic physical 1cm gap (0.1 units).
+        const carriageSpacing = 3.9 / trackLength;
+
+        for (let i = 0; i < numCarriages; i++) {
+            const cGroup = new THREE.Group();
+
+            // Passenger Cart Base
+            const cBase = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.8, 3.8), new THREE.MeshLambertMaterial({ color: 0x34495E }));
+            cBase.position.y = 1.0;
+            cBase.castShadow = true;
+            cGroup.add(cBase);
+
+            // Passenger Cabin (Yellow)
+            const cCabin = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.5, 3.8), new THREE.MeshLambertMaterial({ color: 0xF1C40F }));
+            cCabin.position.y = 2.0;
+            cCabin.castShadow = true;
+            cGroup.add(cCabin);
+
+            scene.add(cGroup);
+            carriages.push(cGroup);
+        }
+
+        // Setup distance for zoom
+        let camDist = 14;
+        let targetCamDist = 14;
+
+        // Mouse Drag Camera Look
+        let isDragging = false;
+        let camYaw = Math.PI; // Face forward relative to train
+        let camPitch = -0.3; // Look slightly down
+
+        document.body.addEventListener('mousedown', () => isDragging = true);
+        window.addEventListener('mouseup', () => isDragging = false);
+        window.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                camYaw -= e.movementX * 0.005;
+                camPitch -= e.movementY * 0.005;
+                // Clamp pitch so we don't flip
+                camPitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, camPitch));
+            }
+        });
+
+        // Mouse Wheel Zoom
+        window.addEventListener('wheel', (e) => {
+            targetCamDist += e.deltaY * 0.02;
+            // clamp zoom limits (5 min, 40 max distance)
+            targetCamDist = Math.max(5, Math.min(40, targetCamDist));
+        });
+
+        // 7. Animation Loop
+        const clock = new THREE.Clock();
+
+        const uiSpeed = document.getElementById('speed-val');
+        const uiStation = document.getElementById('station-val');
+
+        function animate() {
+            requestAnimationFrame(animate);
+            let dt = clock.getDelta();
+            if (dt > 0.1) dt = 0.1; // cap huge jumps
+
+            // Physics Update
+            if (keys.w) velocity += acceleration * dt;
+            if (keys.s) velocity -= brakes * dt;
+
+            // Constrain
+            velocity *= Math.pow(friction, dt * 60); // frame-rate independent friction
+            if (velocity > maxVelocity) velocity = maxVelocity;
+            if (velocity < -maxVelocity * 0.5) velocity = -maxVelocity * 0.5; // reverse slower
+
+            progress += velocity;
+
+            // Loop the progress for an endless track
+            if (progress < 0) progress += 1.0;
+            if (progress >= 1.0) progress -= 1.0;
+
+            // Move Train
+            const currentPoint = curve.getPointAt(progress);
+            trainGroup.position.copy(currentPoint);
+
+            // Move Carriages
+            carriages.forEach((carriage, idx) => {
+                // Calculate position behind the main engine based on index
+                let cProgress = progress - (carriageSpacing * (idx + 1));
+                // Loop carriage progress around the track
+                if (cProgress < 0) cProgress += 1.0;
+
+                const cPos = curve.getPointAt(cProgress);
+                carriage.position.copy(cPos);
+
+                // Make carriage look ahead to the next point on track
+                let lookAhead = cProgress + 0.001;
+                if (lookAhead >= 1.0) lookAhead -= 1.0;
+
+                const cLookAt = curve.getPointAt(lookAhead);
+                carriage.lookAt(cLookAt);
+            });
+
+            // Train lookahead loop
+            let headLook = progress + 0.001;
+            if (headLook >= 1.0) headLook -= 1.0;
+            const lookAhead = curve.getPointAt(headLook);
+            trainGroup.lookAt(lookAhead);
+
+            // Camera System (Chase Cam)
+            // We want camera to stay relative to train's rotation, but user can yaw/pitch
+            trainGroup.updateMatrixWorld();
+
+            // smooth zoom
+            camDist += (targetCamDist - camDist) * 0.1;
+
+            // Calculate local offset using spherical coords (Yaw/Pitch)
+            const cx = Math.sin(camYaw) * Math.cos(camPitch) * camDist;
+            const cy = Math.sin(camPitch) * -camDist + 5;
+            const cz = Math.cos(camYaw) * Math.cos(camPitch) * camDist;
+
+            const localOffset = new THREE.Vector3(cx, cy, cz);
+            // Apply train's transform to local offset
+            const worldCamPos = localOffset.applyMatrix4(trainGroup.matrixWorld);
+
+            // Smoothly move camera
+            camera.position.lerp(worldCamPos, 0.1);
+
+            // Camera looks at train
+            const targetPos = trainGroup.position.clone().add(new THREE.Vector3(0, 3, 0));
+            camera.lookAt(targetPos);
+
+            // Update UI
+            // Calculate displaying speed
+            let kmh = Math.abs(Math.round(velocity * 100000));
+            if (kmh > 30) kmh = 30; // Cap visual display at exactly 30 km/h (Half of previous 60)
+            uiSpeed.innerText = kmh;
+
+            // Find nearest station index (roughly using progress percentage)
+            const stIdx = Math.floor(progress * stationsData.length);
+            if (stationsData[stIdx]) {
+                uiStation.innerText = stationsData[stIdx].name;
+                uiStation.style.color = "#2980B9";
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+
+    </script>
+</body>
+
+</html>
